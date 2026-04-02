@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>転倒予防教材 試作ステップ2（AI返答版）</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #f5f5f5;
+    }
+
+    #imageArea {
+      width: 100%;
+      height: 55vh;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+
+    #patientImage {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+      display: block;
+    }
+
+    #eventOverlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.35);
+      color: #fff;
+      font-size: 32px;
+      font-weight: bold;
+      text-align: center;
+      padding: 20px;
+      box-sizing: border-box;
+      pointer-events: none;
+      text-shadow: 0 2px 6px rgba(0,0,0,0.8);
+    }
+
+    #countdownBox {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      display: none;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(198, 40, 40, 0.92);
+      color: #fff;
+      font-size: 18px;
+      font-weight: bold;
+      z-index: 10;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    }
+
+    #chatArea {
+      height: 45vh;
+      display: flex;
+      flex-direction: column;
+      background: #fff;
+      border-top: 1px solid #ccc;
+    }
+
+    #log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      box-sizing: border-box;
+      line-height: 1.8;
+    }
+
+    #inputArea {
+      display: flex;
+      border-top: 1px solid #ccc;
+    }
+
+    #userInput {
+      flex: 1;
+      padding: 14px;
+      font-size: 16px;
+      border: none;
+      outline: none;
+    }
+
+    button {
+      width: 110px;
+      border: none;
+      background: #2d6cdf;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: #1f56b8;
+    }
+
+    .student {
+      color: #0b57d0;
+      margin-bottom: 6px;
+    }
+
+    .patient {
+      color: #2e7d32;
+      margin-bottom: 12px;
+    }
+
+    .system {
+      color: #c62828;
+      font-weight: bold;
+      margin-bottom: 12px;
+    }
+
+    #controlArea {
+      display: flex;
+      gap: 8px;
+      padding: 8px 12px;
+      border-top: 1px solid #ddd;
+      background: #fafafa;
+    }
+
+    #resetButton {
+      background: #666;
+    }
+
+    #resetButton:hover {
+      background: #444;
+    }
+  </style>
+</head>
+<body>
+  <div id="imageArea">
+    <img id="patientImage" src="patient_normal.jpg" alt="車椅子に座っている高齢者" />
+    <div id="eventOverlay">⚠ 高齢者が立ち上がろうとして転倒しました</div>
+    <div id="countdownBox">残り 5 秒</div>
+  </div>
+
+  <div id="chatArea">
+    <div id="log"></div>
+
+    <div id="inputArea">
+      <input id="userInput" type="text" placeholder="高齢者に話しかけてください" />
+      <button onclick="sendMessage()">送信</button>
+    </div>
+
+    <div id="controlArea">
+      <button id="resetButton" onclick="resetScenario()">やり直す</button>
+    </div>
+  </div>
+
+  <script>
+    const NORMAL_IMAGE = "patient_normal.jpg";
+    const FALL_IMAGE = "patient_fall.jpg";
+
+    const state = {
+      toiletAsked: false,
+      helpOffered: false,
+      mobilityAsked: false,
+      fallTriggered: false,
+      awaitingToiletResponse: false,
+      autoToiletEventStarted: false,
+      autoToiletEventResolved: false,
+      autoToiletSpeakTimer: null,
+      autoToiletFallTimer: null,
+      countdownInterval: null,
+      countdownRemaining: 5
+    };
+
+    function addLog(text, className) {
+      const log = document.getElementById("log");
+      const div = document.createElement("div");
+      div.className = className;
+      div.textContent = text;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function isHelpResponse(text) {
+      const helpKeywords = [
+        "手伝", "介助", "一緒", "付き添", "支え",
+        "見守", "ナースコール", "呼び", "行きましょう",
+        "トイレまで", "お連れ", "連れて", "お手洗い",
+        "案内", "移動を手伝", "支援", "待ってください"
+      ];
+      return helpKeywords.some(keyword => text.includes(keyword));
+    }
+
+    function clearScenarioTimers() {
+      if (state.autoToiletSpeakTimer) {
+        clearTimeout(state.autoToiletSpeakTimer);
+        state.autoToiletSpeakTimer = null;
+      }
+      if (state.autoToiletFallTimer) {
+        clearTimeout(state.autoToiletFallTimer);
+        state.autoToiletFallTimer = null;
+      }
+      if (state.countdownInterval) {
+        clearInterval(state.countdownInterval);
+        state.countdownInterval = null;
+      }
+      hideCountdown();
+    }
+
+    function showCountdown(seconds) {
+      const box = document.getElementById("countdownBox");
+      state.countdownRemaining = seconds;
+      box.textContent = "残り " + state.countdownRemaining + " 秒";
+      box.style.display = "block";
+
+      if (state.countdownInterval) {
+        clearInterval(state.countdownInterval);
+      }
+
+      state.countdownInterval = setInterval(() => {
+        state.countdownRemaining -= 1;
+        if (state.countdownRemaining <= 0) {
+          box.textContent = "残り 0 秒";
+          clearInterval(state.countdownInterval);
+          state.countdownInterval = null;
+        } else {
+          box.textContent = "残り " + state.countdownRemaining + " 秒";
+        }
+      }, 1000);
+    }
+
+    function hideCountdown() {
+      const box = document.getElementById("countdownBox");
+      box.style.display = "none";
+      box.textContent = "残り 5 秒";
+    }
+
+    function startToiletResponseWindow() {
+      state.awaitingToiletResponse = true;
+      state.helpOffered = false;
+      showCountdown(5);
+
+      if (state.autoToiletFallTimer) {
+        clearTimeout(state.autoToiletFallTimer);
+      }
+
+      state.autoToiletFallTimer = setTimeout(() => {
+        if (!state.fallTriggered && state.awaitingToiletResponse && !state.helpOffered) {
+          state.awaitingToiletResponse = false;
+          state.autoToiletEventResolved = true;
+          triggerFall();
+        }
+      }, 5000);
+    }
+
+    function startScenarioTimers() {
+      clearScenarioTimers();
+
+      state.autoToiletSpeakTimer = setTimeout(() => {
+        if (state.fallTriggered || state.autoToiletEventStarted) return;
+
+        state.autoToiletEventStarted = true;
+        state.toiletAsked = true;
+
+        addLog("患者(AI): トイレに行きたいです。", "patient");
+        startToiletResponseWindow();
+      }, 15000);
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById("userInput");
+      const text = input.value.trim();
+      if (!text || state.fallTriggered) return;
+
+      addLog("学生: " + text, "student");
+      input.value = "";
+
+      if (state.awaitingToiletResponse) {
+        if (isHelpResponse(text)) {
+          state.helpOffered = true;
+          state.awaitingToiletResponse = false;
+          state.autoToiletEventResolved = true;
+
+          if (state.autoToiletFallTimer) {
+            clearTimeout(state.autoToiletFallTimer);
+            state.autoToiletFallTimer = null;
+          }
+          if (state.countdownInterval) {
+            clearInterval(state.countdownInterval);
+            state.countdownInterval = null;
+          }
+          hideCountdown();
+
+          addLog("システム: 介助の意図が確認できたため、転倒は回避されました。", "system");
+        } else {
+          state.awaitingToiletResponse = false;
+          state.autoToiletEventResolved = true;
+
+          if (state.autoToiletFallTimer) {
+            clearTimeout(state.autoToiletFallTimer);
+            state.autoToiletFallTimer = null;
+          }
+          if (state.countdownInterval) {
+            clearInterval(state.countdownInterval);
+            state.countdownInterval = null;
+          }
+          hideCountdown();
+
+          setTimeout(() => {
+            if (!state.fallTriggered) {
+              triggerFall();
+            }
+          }, 1000);
+        }
+      }
+
+      if (text.includes("トイレ")) state.toiletAsked = true;
+      if (text.includes("立てる") || text.includes("歩け") || text.includes("移動")) {
+        state.mobilityAsked = true;
+      }
+
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userMessage: text
+          })
+        });
+
+        const data = await res.json();
+        const aiReply = data.reply || "うまく答えられませんでした。";
+
+        if (!state.fallTriggered) {
+          addLog("患者(AI): " + aiReply, "patient");
+        }
+
+        if (
+          !state.fallTriggered &&
+          (
+            aiReply.includes("トイレ") ||
+            aiReply.includes("行きたい") ||
+            aiReply.includes("お手洗い")
+          )
+        ) {
+          startToiletResponseWindow();
+        }
+
+      } catch (e) {
+        addLog("システム: AIとの通信に失敗しました。", "system");
+      }
+    }
+
+    function triggerFall() {
+      if (state.fallTriggered) return;
+
+      state.fallTriggered = true;
+      clearScenarioTimers();
+
+      const img = document.getElementById("patientImage");
+      const overlay = document.getElementById("eventOverlay");
+
+      img.src = FALL_IMAGE;
+      overlay.style.display = "flex";
+
+      addLog("システム: トイレ介助につながる対応がなく、患者が自力で動こうとして転倒しました。", "system");
+    }
+
+    function resetScenario() {
+      clearScenarioTimers();
+
+      state.toiletAsked = false;
+      state.helpOffered = false;
+      state.mobilityAsked = false;
+      state.fallTriggered = false;
+      state.awaitingToiletResponse = false;
+      state.autoToiletEventStarted = false;
+      state.autoToiletEventResolved = false;
+      state.autoToiletSpeakTimer = null;
+      state.autoToiletFallTimer = null;
+      state.countdownInterval = null;
+      state.countdownRemaining = 5;
+
+      document.getElementById("patientImage").src = NORMAL_IMAGE;
+      document.getElementById("eventOverlay").style.display = "none";
+      document.getElementById("log").innerHTML = "";
+      document.getElementById("userInput").value = "";
+
+      addLog("システム: シナリオを最初の状態に戻しました。", "system");
+      startScenarioTimers();
+    }
+
+    document.getElementById("userInput").addEventListener("keydown", function(event) {
+      if (event.key === "Enter") {
+        sendMessage();
+      }
+    });
+
+    startScenarioTimers();
+  </script>
+</body>
+</html>
